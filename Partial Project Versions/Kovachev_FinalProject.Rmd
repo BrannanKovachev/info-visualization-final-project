@@ -1,0 +1,453 @@
+---
+title: "Emissions in California Counties"
+author: "Donald Rogers, Brannan Kovachev"
+date: "2022-11-10"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load-libraries, include=FALSE, message=FALSE}
+pacman::p_load(arrow, stringr, socviz, tidyverse, rmarkdown, 
+               htmlwidgets, htmltools, maps, leaflet, kableExtra, tinytex,
+               ggthemes, dplyr, webshot)
+
+```
+
+```{r load-datasets, include=FALSE}
+#1 Demographic/Population Statistics 2017
+acs2017 <- read_csv("./data/acs2017_county_data.csv")
+
+#2 National Emissions Inventory 2017 - Pollution
+NEI2017 <- read_parquet("./data/NEI_2017_full_data.parquet")
+
+#3 Population Raw Data Annual County level : No Demographics
+populationData <- read_csv("./data/co-est2019-alldata.csv")
+
+#4 Zip/County/FIPS
+countyFIPS  <- read_csv("./data/ZIP-COUNTY-FIPS_2018-03.csv")
+
+```
+#### Introduction
+
+As a whole, my team is looking at various trends and relationships with regards to supplying electric power in the United States. Rather than looking at the U.S. in general, my part of the project is about zooming into one of the largest states, California, and looking at the emissions produced in the pursuit of supplying electricity. First, I will visualize the emissions produced by each county. Using this wrangled data, I will then examine the relationship between a county's change in population and its quantity of emissions. Finally, I will compare the Demographics of various counties based on how bad their emissions are in order to determine if any groups are disproportionately suffering the effects of emissions.
+
+
+
+
+
+
+#### Question 1: What is the distribution of emissions due to the supply of electric power across California counties?
+
+We will begin by creating a heat map of the emissions of each county across California. However, we should be specific about what type of emissions we care about. I am interested in the emissions as related to the supply of electric power. While power plants certainly play a hand in this, they are not the only source of such emissions. As such, I have used a data set which contains site locations, their emissions, and a 'NAICS Code' among a few other variables. Most notably, this NAICS Code will be how we identify locations related to supplying electric power. Without going into too much detail, a NAICS code is self assigned by a company based on what industry they are a part of. Each code is built using sets of digits where more digits are added when more specificity is required. This allows us to be as general or specific as we like in terms of which industry(s) and sector(s) we target. For my purposes, I am using code '2211' which includes all "Electric Power Generation, Transmission, and Distribution" company sites. This allows me to capture the full breadth of emissions from sites in California related to supplying electric power. Here is the choropleth of such site's emissions in California:
+
+```{r caCountyEmissions, include=TRUE, message=FALSE}
+#Get total emissions in a County
+caEmissionsByCounty <- NEI2017 %>%
+  filter(state=="CA",`pollutant type(s)`!="nan", str_starts(as.character(.$`naics code`),"2211")) %>%
+  select(`fips code`,county,`pollutant type(s)`,`total emissions`,`emissions uom`,`naics code`) %>%
+  mutate(`total emissions`=case_when(as.character(`emissions uom`)=="LB" ~ `total emissions`*.0005,
+                                     TRUE ~ `total emissions`),
+         `fips code` = paste0('0',as.character(`fips code`))) %>%
+  select(-`emissions uom`) %>%
+  group_by(county,`fips code`) %>%
+  summarise(`county_total_emissions`=sum(`total emissions`)) %>%
+  rename(id = `fips code`)
+
+#Join with map data
+counties <- left_join(county_map,caEmissionsByCounty,by="id") %>% na.omit()
+
+#Plot Choropleth of California as a Heat map of Emissions
+counties %>%
+  ggplot(mapping = aes(x=long,y=lat,group=group,fill=county_total_emissions)) +
+  geom_polygon(color="gray") +
+  coord_equal() +
+  theme_map() +
+  scale_fill_gradientn(colors=c("lightgray","darkorchid1","darkorchid2","darkorchid3","darkorchid4"),
+                       name="Emissions (Tons)") +
+  theme(legend.position = "right") +
+  labs(title="Site Emissions in California Counties", subtitle = "Electricity Power Generation, Transmission, and Distribution")
+
+```
+
+
+The emissions in the state seem to be congregated around two nodes. The northern node includes the Eastern Bay Area and some of the northern Central Counties while the southern node is generally encompassed by Southern Counties, most notably Kern and Los Angeles. Other than those clusters, the remaining counties have much fewer emissions with a number not even appearing as they lack emissions entirely.
+
+Based on a hunch and global trends, let's take a look at the heatmap of the population in each of California's counties:
+
+```{r caCountyPopulation, include=TRUE, message=FALSE}
+#Get total population in a County
+CaCountyPopulation <- acs2017 %>%
+  filter(State == "California") %>%
+  rename(id=CountyId) %>%
+  select(-State) %>%
+  select(id, TotalPop, County) %>%
+  mutate(County = str_remove(County," County"),
+         id = paste0('0',as.character(id))) %>%
+  rename(county = County)
+
+#Join with map data
+countiesPop <- left_join(county_map,CaCountyPopulation,by="id") %>% na.omit()
+
+#Plot Choropleth of California as a Heat map of Population
+countiesPop %>%
+  ggplot(mapping = aes(x=long,y=lat,group=group,fill=TotalPop)) +
+  geom_polygon(color="gray") +
+  coord_equal() +
+  theme_map() +
+  scale_fill_gradientn(colors=c("lightgray","darkorchid1","darkorchid2","darkorchid3","darkorchid4"),
+                       name="Population") +
+  theme(legend.position = "right") +
+  labs(title="Population in California Counties")
+
+
+```
+
+Indeed, it's relatively close to what one might suspect. The two nodes seem similar with one near the Bay area and one Near Los Angeles. However, the actual relative magnitude of the particular counties does look different. For example, when we were looking at the emissions, Kern was the darkest shaded county in the southern node. However, in creating a heat map of population, we see that Los Angeles has the most individuals within its borders. This leads us to conclude that there is certainly a positive association between emissions and raw population but not 1:1 correlation.
+
+Related to this question, though mostly pursued out of curiosity, I was interested in seeing if there was a noticeable clustering of sites in these two nodes or if the emissions were perhaps being produced by a few, very substantial sites. In order to visualize this question, I created the following Leaflet:
+
+```{r caCountyElectricitySupplySites, include=TRUE, message=FALSE}
+#Create Leaflet DataFrame of locations of sites related to supplying electricity
+energySiteLocationsCA <- NEI2017 %>%
+  filter(state=="CA",`pollutant type(s)`!="nan", str_starts(as.character(.$`naics code`),"2211")) %>%
+  select(`site name`,`naics description`,`site latitude`, `site longitude`,
+         address,city,`zip code`,`postal abbreviation`)%>%
+  distinct()
+
+#Create Leaflet Labels using site information
+energySiteLabels <- sprintf("<b>%s</b></br>
+                            %s</br>
+                            %s</br>
+                            %s, %s %s",
+                   energySiteLocationsCA$`site name`, 
+                   energySiteLocationsCA$`naics description`, 
+                   energySiteLocationsCA$address,
+                   energySiteLocationsCA$city,
+                   energySiteLocationsCA$`postal abbreviation`,
+                   energySiteLocationsCA$`zip code`) %>%
+  lapply(htmltools::HTML)
+
+#Create Leaflet Map
+mapStates = map("state", fill = TRUE, plot = FALSE)
+
+#Create Custom Icon
+greenLeafIcon <- makeIcon(
+  iconUrl = "img/factoryIcon2.png",
+  iconWidth = 17, iconHeight = 17)
+
+#Create Leaflet
+energySiteLocationsCA %>%
+  leaflet(options=leafletOptions(zoomSnap=0.1)) %>%
+  setView(lng=-120.5049115302131, lat=37.53869072160772, zoom=5.8) %>%
+  addTiles() %>%
+  addMarkers(~`site longitude`, ~`site latitude`, popup=energySiteLabels,label=energySiteLabels,icon = greenLeafIcon)
+
+```
+As we can see, there does seem to be many sites clustered in these regions. It is not just the act of a few very bad emitters that cause this concentration of emissions. You can even hover over each location to see that they are individually named and independent sites.
+
+
+
+
+
+
+
+#### Question 2: What is the trend between population change and a county's emissions?
+
+I was interested in determining whether counties with large amounts of emissions had a relatively faster decreasing population. The detail about 'relatively faster' is important as I am not looking at if their population decreased **at all**. No, instead, I want to know whether it is decreasing (or perhaps increasing) faster than other counties in California. We need to properly make this comparison as otherwise we might correlate a statewide decrease in population with emissions when in fact there are a host of economic reasons California has had for in increasing number of citizens emigrating from the state. Ultimately, My hypothesis was that counties with more emissions would have a population increasing more slowly or entirely decreasing when compared to those with less emissions.
+
+In order to determine this, I got each county's rank in terms of quantity of emissions and in terms of average population change over the past five years. I then plotted these two ranks and drew a best fit line to see the direction of correlation:
+
+
+```{r caCountyRankCorrelation, include=TRUE, message=FALSE}
+#Create a Dataframe of the average Population Change in each California County for the past 5 years
+caCountyPopulationChange <- populationData %>%
+  filter(STNAME=="California",COUNTY!= "000") %>%
+  select(STATE,CTYNAME,COUNTY,NPOPCHG_2015,NPOPCHG_2016,NPOPCHG_2017,NPOPCHG_2018,NPOPCHG_2019) %>%
+  mutate(fips = paste0(.$STATE,.$COUNTY), 
+         fiveYearAvgPopChange = (NPOPCHG_2015+NPOPCHG_2016+NPOPCHG_2017+NPOPCHG_2018+NPOPCHG_2019)/5,
+         CTYNAME=str_remove(CTYNAME," County")) %>%
+  select(fips, fiveYearAvgPopChange,CTYNAME) %>%
+  rename(id = fips,name=CTYNAME)
+
+#Join the Population Change dataframe with the County Emissions dataframe from question 1
+emissionsPopChangeByCounty <- left_join(caCountyPopulationChange, caEmissionsByCounty, by="id") %>%
+  select(-county) %>%
+  na.omit()
+
+#Sort by population change
+emissionsPopChangeByCounty <- emissionsPopChangeByCounty %>%
+  arrange(fiveYearAvgPopChange)
+
+#Add rank in terms of population change
+emissionsPopChangeByCounty <- emissionsPopChangeByCounty %>% add_column(rankOfPopChange = NA)
+for (i in 1:length(emissionsPopChangeByCounty$fiveYearAvgPopChange)){
+  emissionsPopChangeByCounty$rankOfPopChange[i] = i
+}
+
+#Sort by emissions
+emissionsPopChangeByCounty <- emissionsPopChangeByCounty %>%
+  arrange(county_total_emissions)
+
+#Add rank in terms of emissions
+emissionsPopChangeByCounty <- emissionsPopChangeByCounty %>% add_column(rankOfEmissions = NA)
+for (i in 1:length(emissionsPopChangeByCounty$county_total_emissions)){
+  emissionsPopChangeByCounty$rankOfEmissions[i] = i
+}
+
+#Plot the Rank of a County in terms of it's Population Change vs its Rank in terms of Quantity of Emissions
+emissionsPopChangeByCounty %>%
+  ggplot() +
+  geom_point(aes(x=rankOfEmissions,y=rankOfPopChange,
+                 color=rankOfPopChange*rankOfEmissions),size=3) +
+  geom_smooth(aes(x=rankOfEmissions,y=rankOfPopChange), method = "lm", se = FALSE, color="deeppink") +
+  scale_colour_gradient(low="blue",high="red") +
+  theme_minimal() +
+  annotate('text', emissionsPopChangeByCounty$rankOfEmissions, emissionsPopChangeByCounty$rankOfPopChange-1, label=emissionsPopChangeByCounty$name) +
+  xlab(label="Rank by Quantity of Emissions") +
+  ylab(label="Rank by Increase in Population") +
+  labs(title="California Counties Ranked", subtitle = "Population Increase vs Emissions") + 
+  guides(color="none",size="none")
+```
+
+
+As evident by the chart, it turns out that the greater emissions you have, the more positive your population change is. This makes sense as it is a normal trend of population clusters around the world. Simply, if you have more people coming in, you'll need more energy for them and thus will create more emissions when supplying that energy. It seems that the pollution in and around these regions is not bad enough yet to convince individuals to move elsewhere.
+
+
+
+
+
+
+#### Question 3: What are the demographics in the counties with the most emissions?
+
+Finally, I was interested in determining if the emissions from power generation were disproportionately affecting underrepresented demographic groups. In order to determine this, I started by making a list of the top 10 counties which produce the most emissions. I also got data about the demographics of all the counties in California. Using this demographic information, I found the average percent representation of each demographic across all of California. This "average percent" value is important as I used it to find the percentage point difference between a demographic across all of California and its specific representation in each of the top 10 emitting counties. Rephrasing this statement for clarification; I found the difference of a demographic's percent representation statewide and its representation in the top 10 emitting counties. I was then able to create a column chart of this "difference from Average Representation" value and each of the Demographics, faceting it by county:
+
+
+```{r caCountyDemogrphicsTop10Emitters, include=TRUE, message=FALSE}
+#Get the top 10 counties with the worst emissions
+top10EmittingCounties <- caEmissionsByCounty %>% 
+  ungroup() %>%
+  arrange(desc(county_total_emissions)) %>%
+  mutate(id=as.double(id)) %>%
+  select(-county) %>%
+  head(10)
+
+#Get the Demographics of California Counties
+CaCountyDemographics <- acs2017 %>%
+  filter(State == "California") %>%
+  rename(id=CountyId) %>%
+  select(-State) %>%
+  select(id, Hispanic, White, Black, Native, Asian, Pacific, County) %>%
+  mutate(County = str_remove(County," County")) %>%
+  rename(county = County)
+
+#Get the average percentage of each racial demographic in California
+meanHispanic <- mean(CaCountyDemographics$Hispanic)
+meanWhite <- mean(CaCountyDemographics$White)
+meanBlack <- mean(CaCountyDemographics$Black)
+meanNative <- mean(CaCountyDemographics$Native)
+meanAsian <- mean(CaCountyDemographics$Asian)
+meanPacific <- mean(CaCountyDemographics$Pacific)
+
+#Get demographics of top10EmittingCounties by joining dataframes,
+#and then Get each Demographic's percent difference from the average in each county
+top10EmittingCountiesDemos <- left_join(top10EmittingCounties, CaCountyDemographics) %>%
+  pivot_longer(Hispanic:Pacific,names_to = "demographic",values_to = "percent") %>%
+  mutate(diffFromAvgRepresentation = case_when(demographic == "Hispanic" ~ percent - meanHispanic,
+                                               demographic == "White" ~ percent - meanWhite,
+                                               demographic == "Black" ~ percent - meanBlack,
+                                               demographic == "Native" ~ percent - meanNative,
+                                               demographic == "Asian" ~ percent - meanAsian,
+                                               demographic == "Pacific" ~ percent - meanPacific),
+         diffFromAvgRepresentation = round(diffFromAvgRepresentation,2),
+         sign = sign(diffFromAvgRepresentation))
+
+#Create a Column chart of the difference of each demographic's percent difference from the average 
+#in the counties with the worst emissions
+top10EmittingCountiesDemos %>%
+  ggplot(aes(x=demographic,y=diffFromAvgRepresentation,fill=factor(sign))) +
+  geom_col() +
+  theme_light() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label="Demographic") +
+  ylab(label="Representation Relative to Average") +
+  labs(title="Demographic Representation in California Counties", 
+       subtitle = "Top 10 Pollutant Emitters", 
+       fill="Demographic") + 
+  scale_fill_manual(values = c("firebrick4", "chartreuse4")) +
+  guides(fill="none") +
+  facet_wrap(~ county, nrow = 2)
+```
+
+
+What we see above is that any time a Demographic's percent representation in a county is less than the state average, the value is negative and its bar is colored red. Of course, when its percent average in that county is greater than the state average, it is positive and colored green. Immediately, what stands out is that the white Demographic in the counties with the worst emissions always has a smaller representation than its state average. The Native and Pacific Demographics are already so small such that their relative difference from the mean is very minor, but it appears that they are less than their mean state representation as well. The remaining three demographics in this list do *on occasion* score below their state average, but they tend to stay very near it when they do. Generally though, I think it is fair to say that the Asian, Black, and Hispanic demographics are disproportionately represented in the counties with the worst emissions. In fact, the few times one of those three crosses into the red, either one or both of the other two are excessively over-represented in that county.
+
+
+Out of curiosity about confirming the above mentioned trends, I took the average of each Demographics representation in these 10 counties and found the difference from the state wide mean in order to produce the following chart:
+
+```{r caCountyDemogrphicsTop10EmittersAverage, include=TRUE}
+#Get average Demographic representation of the top 10 emitting counties
+top10EmittingCountiesDemosAverage <- top10EmittingCountiesDemos %>%
+  group_by(demographic) %>%
+  summarize(avgDemoRep = mean(diffFromAvgRepresentation)) %>%
+  mutate(sign = sign(avgDemoRep))
+  
+#Graph the demographics of the above average
+top10EmittingCountiesDemosAverage %>%
+  ggplot(aes(x=demographic,y=avgDemoRep,fill=factor(sign))) +
+  geom_col() +
+  theme_light() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label="Demographic") +
+  ylab(label="Representation Relative to Average") +
+  labs(title="Demographic Representation in California Counties", 
+       subtitle = "Average of Top 10 Pollutant Emitters", 
+       fill="Demographic") + 
+  scale_fill_manual(values = c("firebrick4", "chartreuse4")) +
+  guides(fill="none")
+```
+
+
+Though it is a much smaller, simpler visualization, I think this bar chart makes the truth self-evident. Demographics which are underrepresented statewide have to suffer the worst emission pollution across California's counties.
+
+
+
+Seeing the relative Demographic representation in each of the top 10 worst polluting counties, I was curious about the same distribution in the 10 counties which pollute the least:
+
+```{r caCountyDemogrphicsBottom10Emitters, include=TRUE, message=FALSE}
+#Get the 10 Counties with the least emissions and their demographics
+bottom10EmittingCounties <- caEmissionsByCounty %>% 
+  ungroup() %>%
+  arrange(county_total_emissions) %>%
+  mutate(id=as.double(id)) %>%
+  select(-county) %>%
+  head(10)
+
+#Get demographics of bottom10EmittingCounties
+bottom10EmittingCountiesDemos <- left_join(bottom10EmittingCounties, CaCountyDemographics) %>%
+  pivot_longer(Hispanic:Pacific,names_to = "demographic",values_to = "percent") %>%
+  mutate(diffFromAvgRepresentation = case_when(demographic == "Hispanic" ~ percent - meanHispanic,
+                                               demographic == "White" ~ percent - meanWhite,
+                                               demographic == "Black" ~ percent - meanBlack,
+                                               demographic == "Native" ~ percent - meanNative,
+                                               demographic == "Asian" ~ percent - meanAsian,
+                                               demographic == "Pacific" ~ percent - meanPacific),
+         diffFromAvgRepresentation = round(diffFromAvgRepresentation,2),
+         sign = sign(diffFromAvgRepresentation))
+
+#Graph the demographics of the 10 least emitting counties
+bottom10EmittingCountiesDemos %>%
+  ggplot(aes(x=demographic,y=diffFromAvgRepresentation,fill=factor(sign))) +
+  geom_col() +
+  theme_light() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label="Demographic") +
+  ylab(label="Representation Relative to Average") +
+  labs(title="Demographic Representation in California Counties", 
+       subtitle = "Bottom 10 Pollutant Emitters", 
+       fill="Demographic") + 
+  scale_fill_manual(values = c("firebrick4", "chartreuse4")) +
+  guides(fill="none") +
+  facet_wrap(~ county, nrow = 2)
+```
+
+At first glance, this chart seems nearly the inverse of the previous, but personally I was surprised that there were still such large negative measurements for the white demographic. After all, it can't be that every county is less than the state average, right? Right. It turns out that the above visualization is of the counties with the least emission *as long as they still had emissions*. 
+
+Instead, lets take a look a the counties with truly the fewest emissions. Those with absolutely none:
+
+
+```{r caCountyDemogrphicsNoEmissions, include=TRUE}
+#We can graph Demographics of counties with NO Emissions
+
+#Get all FIPS in California
+caFips <- countyFIPS  %>%
+  filter(STATE=="CA") %>%
+  select(STCOUNTYFP) %>%
+  rename(id = STCOUNTYFP) %>%
+  distinct() %>%
+  pull(id) %>%
+  as.integer()
+
+#Get FIPS of Counties that have Emissions for Energy
+caCountyWithEnergyEmissionsFips <- pull(caEmissionsByCounty,id) %>%
+  as.integer()
+
+#Get FIPS of Counties that don't have Emissions for Energy
+caCountyNoEnergyEmissionsFips <- data.frame(id = setdiff(caFips,caCountyWithEnergyEmissionsFips))
+
+
+#Get demographics of counties that don't have Emissions for Energy
+noEmissionsCounties <- left_join(caCountyNoEnergyEmissionsFips, CaCountyDemographics,by="id") %>%
+  pivot_longer(Hispanic:Pacific,names_to = "demographic",values_to = "percent") %>%
+  mutate(diffFromAvgRepresentation = case_when(demographic == "Hispanic" ~ percent - meanHispanic,
+                                               demographic == "White" ~ percent - meanWhite,
+                                               demographic == "Black" ~ percent - meanBlack,
+                                               demographic == "Native" ~ percent - meanNative,
+                                               demographic == "Asian" ~ percent - meanAsian,
+                                               demographic == "Pacific" ~ percent - meanPacific),
+         diffFromAvgRepresentation = round(diffFromAvgRepresentation,2),
+         sign = sign(diffFromAvgRepresentation))
+
+#Generate Barchart of Demographics in Counties with No Emissions
+noEmissionsCounties %>%
+  ggplot(aes(x=demographic,y=diffFromAvgRepresentation,fill=factor(sign))) +
+  geom_col() +
+  theme_light() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label="Demographic") +
+  ylab(label="Representation Relative to Average") +
+  labs(title="Demographic Representation in California Counties", 
+       subtitle = "No Registered Pollutant Emitters", 
+       fill="Demographic") + 
+  scale_fill_manual(values = c("firebrick4", "chartreuse4")) +
+  guides(fill="none") +
+  facet_wrap(~ county, nrow = 2)
+```
+
+
+Now we can really see the truth of the matter. Every single county (baring 2 of 14) which don't produce emissions in California is dominated by white representation. The only counties that are not dominate by white representation are dominated by the Hispanic demographic, and this is likely as it is a cultural hub for this group. In fact, other than San Benito and Glenn (the counties dominated by the Hispanic demographic), the three underrepresented groups of Asian, Black, and Hispanic are all entirely in the red. If it wasn't evident before, it should be clear now that certain demographics suffer the pollution of emissions far worse than others.
+
+
+Finally, as we've been look at the percent difference from the state mean this whole time, I was curious about seeing the raw percent representation of each demographic across these two extremes. Below I have created two tables. The first is of the top 10 counties with the most emissions, and the second is of those counties with no emissions:
+
+
+```{r caCountyDemogrphicsTables, include=TRUE, message=FALSE}
+#Get Data pf Demographics for Counties with the Most Emissions
+top10EmittingCountiesDemosTable <- left_join(top10EmittingCounties, CaCountyDemographics) %>%
+  select(county, Asian, Black, Hispanic, Native, Pacific, White) %>%
+  arrange(county) %>%
+  rename(County = county)
+
+#Get Data of Demographics for Counties with No Emissions
+noEmissionsCountiesDemosTable <- left_join(caCountyNoEnergyEmissionsFips, CaCountyDemographics) %>%
+  select(county, Asian, Black, Hispanic, Native, Pacific, White) %>%
+  arrange(county) %>%
+  rename(County = county)
+
+#Show Table of Top 10 Emitters
+top10EmittingCountiesDemosTable %>% kable(align="c") %>%
+  kable_styling(bootstrap_options="striped",
+                full_width=FALSE,
+                position="center") %>%
+  row_spec(0,color="white",background="#2f4f4f") %>%
+  row_spec(1:10,color="#2f4f4f")
+
+#Show Table of No Emitters
+noEmissionsCountiesDemosTable %>%
+  kbl(align="c") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"),
+                full_width=FALSE,position="center") %>%
+  row_spec(0,color="white",background="#2f4f4f") %>%
+  row_spec(1:14, color="#2f4f4f")
+```
+
+Even without getting into the nuance of difference from the state mean, we can at a glance come to similar conclusions as before. I would even argue that seeing the magnitude of each county's demographic breakdown makes the situation seem even more self-evident.
+
+
+#### Conclusion
+
+Overall, the conclusions we can come to about California's emissions in relation to electricity supply are relatively standard and unfortunately too common. It produces more emissions near it largest population centers: Los Angeles and the Bay Area. As the population of a region changes more positively, it tends to have greater emissions. Finally, demographics which are underrepresented statewide must suffer the worst of the pollution from emissions. Though it would be very challenging and there are many practical difficulties, it may one day be useful to consider decoupling these trends. California is just one state, but these trends have been spoken about as a worldwide phenomenon. Eventually, populations will suffer too much from pollution. We will need to find a way to limit or remove the contaminates from our largest centers of civilization if we hope to for a better future.
