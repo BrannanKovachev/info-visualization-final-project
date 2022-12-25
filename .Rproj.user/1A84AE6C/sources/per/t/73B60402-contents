@@ -1,0 +1,1028 @@
+---
+always_allow_html: true
+title: "Final Project Group 2 No Code"
+author: "Donald Rogers, Brannan Kovachev, Jeremy Wright"
+date: "2022-11-17"
+output:
+  
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(knitr.table.format = "latex")
+```
+
+```{r load-libraries, include=FALSE, message=FALSE}
+pacman::p_load(arrow, stringr, socviz, tidyverse, rmarkdown, 
+               htmlwidgets, htmltools, maps, leaflet, kableExtra, tinytex,
+               ggthemes, dplyr, webshot, sf, usmap, RColorBrewer, cowplot)
+
+```
+
+```{r load-data, include=FALSE}
+# Question 1 & 3 data
+countyGeneration <- read_csv("./data/organised_Gen.csv")
+us_states <- us_map("states")
+
+# Question 2 data
+# https://www.kaggle.com/datasets/rasyidstat/ds4g-additional-dataset
+stateGen <- readxl::read_xls("./data/annual_generation_state.xls")
+stateEmis <- readxl::read_xls("./data/emission_annual.xls")
+```
+
+```{r q2-wrangling, include=FALSE}
+# Make a dataframe containing all emissions (except the totals) for each state and the entire US in 2018
+Emis18 <- stateEmis %>%
+  filter(Year == 2018) %>%
+  filter(`Energy Source` != "All Sources") %>%
+  select(State, `Energy Source`, `CO2
+(Metric Tons)`, `SO2
+(Metric Tons)`, `NOx
+(Metric Tons)`) %>%
+  rename("Source" = `Energy Source`)
+
+# Combining two columns to make a left join easier with the other dataset
+Emis18$combine <- paste(Emis18$State, Emis18$Source, sep = "," )
+
+# Putting data into a single entry for each source per state.
+Emis18 <- Emis18 %>%
+  group_by(combine) %>%
+  summarize(CO2 = sum(`CO2
+(Metric Tons)`),SO2 = sum(`SO2
+(Metric Tons)`),NOx = sum(`NOx
+(Metric Tons)`))
+
+# Making a dataframe containing all of the power generation in 2018 by state
+Gen18 <- stateGen %>%
+  filter(YEAR == 2018) %>%
+  filter(`ENERGY SOURCE` != "Total") %>%
+  select(STATE, `ENERGY SOURCE`, `GENERATION (Megawatthours)`) %>%
+  rename("Source" = `ENERGY SOURCE`)
+
+# Combining for a left_join
+Gen18$combine <- paste(Gen18$STATE, Gen18$Source, sep = ",")
+
+# Getting a single observation for source per state
+Gen18 <- Gen18 %>%
+  group_by(combine) %>%
+  summarize(MWh = sum(`GENERATION (Megawatthours)`))
+
+# Combining the two datasets together
+combined18 <- left_join(Gen18, Emis18, by = "combine") %>%
+  separate(combine, c("State","Source"), extra = "merge", fill = "left")
+
+# Converting from raw numbers into tons per MWh
+emissionsMWh <- combined18 %>%
+  na.omit() %>%
+  mutate("Tons CO2/MWh" = CO2/MWh,"Tons SO2/MWh" = SO2/MWh,"Tons NOx/MWh" = NOx/MWh,) %>%
+  select(State, Source, `Tons CO2/MWh`, `Tons SO2/MWh`, `Tons NOx/MWh`)
+```
+
+```{r q3-wrangling, include=FALSE}
+# Getting generation per state for 2021
+state_gen <- countyGeneration %>%
+  filter(YEAR == 2021) %>%
+  group_by(STATE) %>%
+  summarize(sum(`GENERATION (Megawatthours)`)) %>%
+  rename("abbr" = "STATE",
+         "gen" = "sum(`GENERATION (Megawatthours)`)") %>%
+  mutate(gen = gen/1000000)
+
+# Making dataframe for chloropleth
+state_gen_map <- left_join(us_states, state_gen, by = "abbr")
+
+# Generation per state for 2001, 2005, 2010, 2015, and 2020
+gap5yr <- countyGeneration %>%
+  filter(YEAR %in% c(2001,2005,2010,2015,2020)) %>%
+  group_by(YEAR, STATE) %>%
+  summarize(sum(`GENERATION (Megawatthours)`)) %>%
+  rename("abbr" = "STATE",
+         "gen" = "sum(`GENERATION (Megawatthours)`)") %>%
+  mutate(gen = gen/1000000)
+
+# Making dataframe with coordinates for map
+gap5yr_map <- left_join(us_states,gap5yr, by = "abbr")
+
+```
+
+# Part 1
+
+### Introduction
+
+Our group decided to do a project examining the role that Green Energy plays within the US and how emissions from energy generation can affect the population surrounding them. My focus was on more generalized information, especially looking at the US from a country-wide scale. To start, I first examined how energy was generated in the US.
+
+#### Question 1: What is the historical trend for clean energy since 2001 in the US?
+
+First, I generated a line graph detailing the different amounts of energy producers within the US. The dataset had data from 2001-2022, but the 2022 data was incomplete, so the graphs only show up until 2021. This visualization only takes into account the total amount of facilities devoted to each resource, instead of total power generated, but provides a good idea of how our country's energy footprint has changed over the years.
+
+```{r question-1a, message=FALSE, echo=FALSE}
+# scatterplot with line of data from all years before 2022, colored by source
+countyGeneration %>%
+  filter(YEAR < 2022) %>%
+  group_by(YEAR, `ENERGY SOURCE`) %>%
+  summarize(count = n()) %>%
+  ggplot(aes(x = YEAR, y = count, group = `ENERGY SOURCE`, color=`ENERGY SOURCE`))+
+  geom_line(aes(color = `ENERGY SOURCE`)) +
+  geom_point(aes(color = `ENERGY SOURCE`)) +
+  labs(title = "Number of Energy Producers in the US", subtitle = "(2001-2021)", y = "Number of Producers",
+       x = "Year", color = "Energy Source") +
+  theme_classic()
+```
+  
+As can be seen above, energy producers based off of fossil fuels (or "Brown Energy") are still dominant, with natural gas and petroleum topping the charts, but there have been increases to the amount of green energy producers, especially since 2010. Next, let's filter out the brown energy sources so that we can see their trends better.
+
+```{r question-1b,message=FALSE, echo=FALSE}
+# Same graph but filtering out all sources of brown energy
+countyGeneration %>%
+  filter(YEAR < 2022) %>%
+  filter(`ENERGY SOURCE` %in% c("Geothermal","Hydroelectric Conventional","Nuclear",
+                                "Other Biomass", "Pumped Storage","Solar Thermal 
+                                and Photovoltaic", "Wind", "Wood and Wood Derived Fuels")) %>%
+  group_by(YEAR, `ENERGY SOURCE`) %>%
+  summarize(count = n()) %>%
+  ggplot(aes(x = YEAR, y = count, group = `ENERGY SOURCE`, color=`ENERGY SOURCE`))+
+  geom_line(aes(color = `ENERGY SOURCE`)) +
+  geom_point(aes(color = `ENERGY SOURCE`)) +
+  labs(title = "Number of Green Energy Producers in the US", subtitle = "(2001-2021)", 
+       y = "Number of Producers", x = "Year", color = "Energy Source") +
+  theme_classic()
+```
+  
+As we see here, most of the different types of green energy have had a large increase since 2001. Solar, Thermal, and Photovoltaic have had the most growth, with Biomass and Wind following close behind. Surprisingly enough, the only form of energy generation that seems to decline is Nuclear. This is likely due to the fact that nuclear energy is seen as dangerous, although many of those concerns have been answered in recent years.
+
+
+
+
+#### Question 2: What types of energy are most efficient within the United States?
+
+Moving to possibly answer the previous question, I next examined which forms of energy were the most efficient, in terms of generating the least amount of pollutants per Megawatt hour of electricity. To provide some contest, an average American household uses about 10 MWh of power per year. The dataset also has emissions separated into three different types. They are Carbon Dioxide, Sulfur Dioxide, and Nitrogen Oxides (NO and NO2). To give a frame of reference for the amount of pollutants generated, driving a car for a year will generate about 4.5 metric tons of CO2. Sulfur Dioxide and Nitrogen Oxides are much more harmful than CO2, and are generated much less frequently than CO2 by consumers. Moving to the visualizations, I first found how many Megawatt hours of energy were generated per state in 2018 (2018 was the most recent year there was data for within the dataset), then how many metric tons of CO2, SO2, and NOx were generated per state in 2018. After joining the two datasets together, the following table was created.
+  
+```{r question-2a, message=FALSE, echo=FALSE}
+# Table showing all states, their emissions by source, and their power generated by source
+combined18 %>%
+  rename("MWh Generated" = "MWh") %>%
+  head(50) %>%
+  kbl(caption = "Power Generation and Emissions") %>%
+  kable_minimal() %>%
+  add_header_above(c(" " = 3, "Gas Emissions (Metric Tons)" = 3))
+```
+
+  
+The previous table showed only the first 50 observations and with over 500 observations in total, there's not much purpose to putting all of them in one table. So, since we are focusing on the entire US, let's look at the totals for the entire US to get a good idea of what energy source is the most efficient.
+  
+```{r question-2b, message=FALSE, echo=FALSE}
+# Table filtered to just totals from US
+combined18 %>%
+  filter(State == "US") %>%
+  rename("MWh Generated" = "MWh", "Energy Source" = "Source") %>%
+  kbl(caption = "US Total Power Generation and Emissions") %>%
+  kable_minimal() %>%
+  kable_styling(latex_options = "hold_position") %>%
+  add_header_above(c(" " = 3, "Gas Emissions (Metric Tons)" = 3))
+```
+  
+As the table shows, there are many different types of energy that don't have any emissions recorded for those types of power plants. This is to be expected, as many of these sources don't generate any emissions since they don't require anything to be burnt to generate power. Nuclear, while appearing to generate emissions, only generates steam, since the nuclear reactions in the core of the plant are just used to heat water and don't make any gases by themselves. So, to answer the question of which energy generation is the most efficient (in terms of amount of emissions), we have our answer: Hydroelectric, Nuclear, Solar, Thermal, Photovoltaic, and Wind. I didn't include Pumped Storage, as the table shows that we actually lose power in total when using pumped storage. To see which forms of energy that create emissions are most efficient, all of the sources with no emissions were dropped for the next table.
+```{r question-2c, message=FALSE, echo=FALSE}
+# Further filtered to not include sources with no emissions in all three categories
+combined18 %>%
+  na.omit() %>%
+  filter(State == "US") %>%
+  rename("MWh Generated" = "MWh", "Energy Source" = "Source") %>%
+  kbl(caption = "US Total Power Generation and Emissions") %>%
+  kable_minimal() %>%
+  kable_styling(latex_options = "HOLD_position") %>%
+  add_header_above(c(" " = 3, "Gas Emissions (Metric Tons)" = 3))
+```
+  
+As we can see from the remaining fuels, most of the emissions created in the US come from Brown Energy, such as Coal and Natural Gas, which also account for a majority of the energy created. Before doing any calculations, we can see that Natural Gas is much more efficient than Coal when it comes to emissions, as there were more MWh generated by Natural Gas sources yet less emissions in every category. Some forms of Green Energy (such as Wood, Biomass, and Geothermal) are still found in this table since they produce some forms of emissions, but not in all three categories.
+
+```{r question-2d, message=FALSE, echo=FALSE}
+# Puts CO2 calculations in table and drops any value that generates 0 tons/mwh
+emissionsMWh %>%
+  filter(State == "US") %>%
+  select(State, Source, `Tons CO2/MWh`) %>%
+  rename("Energy Source" = "Source") %>%
+  filter(`Tons CO2/MWh` > 0) %>%
+  arrange(`Tons CO2/MWh`) %>%
+  kbl(caption = "Carbon Dioxide Generation per Megawatt Hour") %>%
+  kable_minimal() %>%
+  kable_styling(latex_options = "hold_position")
+```
+```{r question-2e, message=FALSE, echo=FALSE}
+# Same as above but with SO2
+emissionsMWh %>%
+  filter(State == "US") %>%
+  select(State, Source, `Tons SO2/MWh`) %>%
+  rename("Energy Source" = "Source") %>%
+  filter(`Tons SO2/MWh` > 0) %>%
+  arrange(`Tons SO2/MWh`) %>%
+  kbl(caption = "Sulfur Dioxide Generation per Megawatt Hour") %>%
+  kable_minimal() %>%
+  kable_styling(latex_options = "hold_position")
+```
+```{r question-2f, message=FALSE, echo=FALSE}
+# Same as above but with NOx
+emissionsMWh %>%
+  filter(State == "US") %>%
+  select(State, Source, `Tons NOx/MWh`) %>%
+  rename("Energy Source" = "Source") %>%
+  filter(`Tons NOx/MWh` > 0) %>%
+  arrange(`Tons NOx/MWh`) %>%
+  kbl(caption = "Nitrous Oxides (NO and NO2) Generation per Megawatt Hour") %>%
+  kable_minimal() %>%
+  kable_styling(latex_options = "hold_position")
+```
+  
+As can be seen by these three tables, many different energy sources are more and less efficient for the different types of emissions. As mentioned before, some of the Green Energy sources only generate one or two types of emissions, meaning they won't appear on each table. As we can see from the tables, Natural Gas is the most efficient Brown Energy source that we have, as it has the least amount of SO2 and NOx emissions per MWh, and is only behind Geothermal energy on the CO2 table. Geothermal is considered to be a nonrenewable source of energy, although it does make emissions, which makes Natural Gas the most efficient Brown Energy on all three charts. When referencing the line graph under Question 1, we see that Coal and Petroleum had the most Energy Producers within the US, but when comparing them to Natural Gas, we can see that Natural Gas is anywhere from twice as efficient (Tons CO2/MWh) to 20 times as efficient (Tons SO2/MWh) as its main competitors.
+
+#### Question 3: Which US States generate the most energy?
+
+This question was relatively straightforward, as I wrangled one of our datasets to group the MWh generated by state in 2021 (most recent year with complete data). I put the data into a Choropleth Map, which can be seen below.
+```{r question-3, message=FALSE, echo=FALSE}
+# Centroid for putting total generation on choropleth
+centroid <- aggregate(data = state_gen_map, cbind(x, y) ~ gen, FUN = mean)
+
+# Choropleth of US as heat map of generation
+state_gen_map %>%
+  ggplot(mapping = aes(x = x, y = y, fill = gen)) +
+  geom_polygon(mapping = aes(group = group)) +
+  geom_text(data = centroid, mapping = aes(x = x, y = y, label =sprintf("%0.0f", gen))) +
+  scale_fill_distiller(palette = "YlOrRd", trans = "reverse") +
+  coord_equal() +
+  theme_map() +
+  labs(title = "US Power Generation by State", subtitle = "2021",
+       x = element_blank(), y = element_blank(), fill = "Generation\n(TWh)")
+
+```
+  
+Looking at the map, the answer to the question becomes obvious. Texas, by almost double, generates the most power in the entire US. The EIA reports that most of this huge power draw is based off of their industrial sector, accounting for over half of their total power generation. This begs the question, has Texas always been the most power hungry state? Going back to 2001, and jumping 5 years each time, the following choropleths are generated.  
+
+```{r question-3b, message=FALSE, echo=FALSE}
+# heatmap of generation wrapped by year
+gap5yr_map %>%
+  ggplot(mapping = aes(x = x, y = y, fill = gen)) +
+  geom_polygon(mapping = aes(group = group)) +
+  scale_fill_distiller(palette = "YlOrRd", trans = "reverse") +
+  coord_equal() +
+  theme_map() +
+  labs(title = "US Power Generation by State",
+       x = element_blank(), y = element_blank(), fill = "Generation\n(TWh)") +
+  facet_wrap(~YEAR)
+```
+  
+After looking at these choropleths, we can see that Texas has been far ahead of every state in terms of power generation for the last 20 years, and has only been increasing the amount of power generated in each subsequent year. Looking at the map, most states seem to be generating more power as we progress through the 21st Century, but the general ranking of highest producers seems to be consistent, with Texas at the top, and California, Florida, Illinois, and Pennsylvania being right behind. The top of the Northeast (above New York) seems to generate the least amount of power per state, with all of the states falling behind the Southeast and Midwest, but the West, save california, Arizona, and Washington doesn't seem to be much higher.
+
+### Conclusion
+
+Overall, we can see a few key things. First, the US seems to be building more and more Green Energy sources, but still isn't replacing a large amount of Brown Energy sources, instead supplementing them with Green Energy. Second, we can see that every Green Energy source is infinitely more efficient than any Brown Energy source, but of the different types of Brown Energy, Natural Gas causes far and away the least amount of emissions per MWh. Third, and finally, we see that Texas is the most power-hungry state in the US, and has been for the entire 21st century. We also saw that power generation has been increasing across the board in the last two decades, but all states seem to be increasing at a similar rate. Moving forward, we should look to push more and more Green Energy sources to the US so that we can start to decrease the amount of Brown Energy producers, which would also cut emissions. If we can't push Green Energy everywhere though, we should make sure to recommend Natural Gas as the next best option to reduce the amount of emissions in the US and then save our planet for generations to come.
+
+# Part 2
+
+```{r load-datasets, include=FALSE, echo=FALSE}
+#1 Demographic/Population Statistics 2017
+acs2017 <- read_csv("./data/acs2017_county_data.csv")
+
+#2 National Emissions Inventory 2017 - Pollution
+NEI2017 <- read_parquet("./data/NEI_2017_full_data.parquet")
+
+#3 Population Raw Data Annual County level : No Demographics
+populationData <- read_csv("./data/co-est2019-alldata.csv")
+
+#4 Zip/County/FIPS
+countyFIPS  <- read_csv("./data/ZIP-COUNTY-FIPS_2018-03.csv")
+
+```
+#### Introduction
+
+As a whole, my team is looking at various trends and relationships with regards to supplying electric power in the United States. Rather than looking at the U.S. in general, my part of the project is about zooming into one of the largest states, California, and looking at the emissions produced in the pursuit of supplying electricity. First, I will visualize the emissions produced by each county. Using this wrangled data, I will then examine the relationship between a county's change in population and its quantity of emissions. Finally, I will compare the Demographics of various counties based on how bad their emissions are in order to determine if any groups are disproportionately suffering the effects of emissions.
+
+
+
+
+
+
+#### Question 1: What is the distribution of emissions due to the supply of electric power across California counties?
+
+We will begin by creating a heat map of the emissions of each county across California. However, we should be specific about what type of emissions we care about. I am interested in the emissions as related to the supply of electric power. While power plants certainly play a hand in this, they are not the only source of such emissions. As such, I have used a data set which contains site locations, their emissions, and a 'NAICS Code' among a few other variables. Most notably, this NAICS Code will be how we identify locations related to supplying electric power. Without going into too much detail, a NAICS code is self assigned by a company based on what industry they are a part of. Each code is built using sets of digits where more digits are added when more specificity is required. This allows us to be as general or specific as we like in terms of which industry(s) and sector(s) we target. For my purposes, I am using code '2211' which includes all "Electric Power Generation, Transmission, and Distribution" company sites. This allows me to capture the full breadth of emissions from sites in California related to supplying electric power. Here is the choropleth of such site's emissions in California:
+
+```{r caCountyEmissions, message=FALSE, echo=FALSE}
+#Get total emissions in a County
+caEmissionsByCounty <- NEI2017 %>%
+  filter(state=="CA",`pollutant type(s)`!="nan", str_starts(as.character(.$`naics code`),"2211")) %>%
+  select(`fips code`,county,`pollutant type(s)`,`total emissions`,`emissions uom`,`naics code`) %>%
+  mutate(`total emissions`=case_when(as.character(`emissions uom`)=="LB" ~ `total emissions`*.0005,
+                                     TRUE ~ `total emissions`),
+         `fips code` = paste0('0',as.character(`fips code`))) %>%
+  select(-`emissions uom`) %>%
+  group_by(county,`fips code`) %>%
+  summarise(`county_total_emissions`=sum(`total emissions`)) %>%
+  rename(id = `fips code`)
+
+#Join with map data
+counties <- left_join(county_map,caEmissionsByCounty,by="id") %>% na.omit()
+
+#Plot Choropleth of California as a Heat map of Emissions
+counties %>%
+  ggplot(mapping = aes(x=long,y=lat,group=group,fill=county_total_emissions)) +
+  geom_polygon(color="gray") +
+  coord_equal() +
+  theme_map() +
+  scale_fill_gradientn(colors=c("lightgray","darkorchid1","darkorchid2","darkorchid3","darkorchid4"),
+                       name="Emissions (Tons)") +
+  theme(legend.position = "right") +
+  labs(title="Site Emissions in California Counties", subtitle = "Electricity Power Generation, Transmission, and Distribution")
+
+```
+
+
+The emissions in the state seem to be congregated around two nodes. The northern node includes the Eastern Bay Area and some of the northern Central Counties while the southern node is generally encompassed by Southern Counties, most notably Kern and Los Angeles. Other than those clusters, the remaining counties have much fewer emissions with a number not even appearing as they lack emissions entirely.
+
+Based on a hunch and global trends, let's take a look at the heatmap of the population in each of California's counties:
+
+```{r caCountyPopulation, echo=FALSE, message=FALSE}
+#Get total population in a County
+CaCountyPopulation <- acs2017 %>%
+  filter(State == "California") %>%
+  rename(id=CountyId) %>%
+  select(-State) %>%
+  select(id, TotalPop, County) %>%
+  mutate(County = str_remove(County," County"),
+         id = paste0('0',as.character(id))) %>%
+  rename(county = County)
+
+#Join with map data
+countiesPop <- left_join(county_map,CaCountyPopulation,by="id") %>% na.omit()
+
+#Plot Choropleth of California as a Heat map of Population
+countiesPop %>%
+  ggplot(mapping = aes(x=long,y=lat,group=group,fill=TotalPop)) +
+  geom_polygon(color="gray") +
+  coord_equal() +
+  theme_map() +
+  scale_fill_gradientn(colors=c("lightgray","darkorchid1","darkorchid2","darkorchid3","darkorchid4"),
+                       name="Population") +
+  theme(legend.position = "right") +
+  labs(title="Population in California Counties")
+
+
+```
+
+Indeed, it's relatively close to what one might suspect. The two nodes seem similar with one near the Bay area and one Near Los Angeles. However, the actual relative magnitude of the particular counties does look different. For example, when we were looking at the emissions, Kern was the darkest shaded county in the southern node. However, in creating a heat map of population, we see that Los Angeles has the most individuals within its borders. This leads us to conclude that there is certainly a positive association between emissions and raw population but not 1:1 correlation.
+
+Related to this question, though mostly pursued out of curiosity, I was interested in seeing if there was a noticeable clustering of sites in these two nodes or if the emissions were perhaps being produced by a few, very substantial sites. In order to visualize this question, I created the following Leaflet:
+
+```{r caCountyElectricitySupplySites, echo=FALSE, message=FALSE}
+#Create Leaflet DataFrame of locations of sites related to supplying electricity
+energySiteLocationsCA <- NEI2017 %>%
+  filter(state=="CA",`pollutant type(s)`!="nan", str_starts(as.character(.$`naics code`),"2211")) %>%
+  select(`site name`,`naics description`,`site latitude`, `site longitude`,
+         address,city,`zip code`,`postal abbreviation`)%>%
+  distinct()
+
+#Create Leaflet Labels using site information
+energySiteLabels <- sprintf("<b>%s</b></br>
+                            %s</br>
+                            %s</br>
+                            %s, %s %s",
+                   energySiteLocationsCA$`site name`, 
+                   energySiteLocationsCA$`naics description`, 
+                   energySiteLocationsCA$address,
+                   energySiteLocationsCA$city,
+                   energySiteLocationsCA$`postal abbreviation`,
+                   energySiteLocationsCA$`zip code`) %>%
+  lapply(htmltools::HTML)
+
+#Create Leaflet Map
+mapStates = map("state", fill = TRUE, plot = FALSE)
+
+#Create Custom Icon
+greenLeafIcon <- makeIcon(
+  iconUrl = "img/factoryIcon2.png",
+  iconWidth = 17, iconHeight = 17)
+
+#Create Leaflet
+energySiteLocationsCA %>%
+  leaflet(options=leafletOptions(zoomSnap=0.1)) %>%
+  setView(lng=-120.5049115302131, lat=37.53869072160772, zoom=5.8) %>%
+  addTiles() %>%
+  addMarkers(~`site longitude`, ~`site latitude`, popup=energySiteLabels,label=energySiteLabels,icon = greenLeafIcon)
+
+```
+As we can see, there does seem to be many sites clustered in these regions. It is not just the act of a few very bad emitters that cause this concentration of emissions. You can even hover over each location to see that they are individually named and independent sites.
+
+
+
+
+
+
+
+#### Question 2: What is the trend between population change and a county's emissions?
+
+I was interested in determining whether counties with large amounts of emissions had a relatively faster decreasing population. The detail about 'relatively faster' is important as I am not looking at if their population decreased **at all**. No, instead, I want to know whether it is decreasing (or perhaps increasing) faster than other counties in California. We need to properly make this comparison as otherwise we might correlate a statewide decrease in population with emissions when in fact there are a host of economic reasons California has had for in increasing number of citizens emigrating from the state. Ultimately, My hypothesis was that counties with more emissions would have a population increasing more slowly or entirely decreasing when compared to those with less emissions.
+
+In order to determine this, I got each county's rank in terms of quantity of emissions and in terms of average population change over the past five years. I then plotted these two ranks and drew a best fit line to see the direction of correlation:
+
+
+```{r caCountyRankCorrelation, echo=FALSE, message=FALSE}
+#Create a Dataframe of the average Population Change in each California County for the past 5 years
+caCountyPopulationChange <- populationData %>%
+  filter(STNAME=="California",COUNTY!= "000") %>%
+  select(STATE,CTYNAME,COUNTY,NPOPCHG_2015,NPOPCHG_2016,NPOPCHG_2017,NPOPCHG_2018,NPOPCHG_2019) %>%
+  mutate(fips = paste0(.$STATE,.$COUNTY), 
+         fiveYearAvgPopChange = (NPOPCHG_2015+NPOPCHG_2016+NPOPCHG_2017+NPOPCHG_2018+NPOPCHG_2019)/5,
+         CTYNAME=str_remove(CTYNAME," County")) %>%
+  select(fips, fiveYearAvgPopChange,CTYNAME) %>%
+  rename(id = fips,name=CTYNAME)
+
+#Join the Population Change dataframe with the County Emissions dataframe from question 1
+emissionsPopChangeByCounty <- left_join(caCountyPopulationChange, caEmissionsByCounty, by="id") %>%
+  select(-county) %>%
+  na.omit()
+
+#Sort by population change
+emissionsPopChangeByCounty <- emissionsPopChangeByCounty %>%
+  arrange(fiveYearAvgPopChange)
+
+#Add rank in terms of population change
+emissionsPopChangeByCounty <- emissionsPopChangeByCounty %>% add_column(rankOfPopChange = NA)
+for (i in 1:length(emissionsPopChangeByCounty$fiveYearAvgPopChange)){
+  emissionsPopChangeByCounty$rankOfPopChange[i] = i
+}
+
+#Sort by emissions
+emissionsPopChangeByCounty <- emissionsPopChangeByCounty %>%
+  arrange(county_total_emissions)
+
+#Add rank in terms of emissions
+emissionsPopChangeByCounty <- emissionsPopChangeByCounty %>% add_column(rankOfEmissions = NA)
+for (i in 1:length(emissionsPopChangeByCounty$county_total_emissions)){
+  emissionsPopChangeByCounty$rankOfEmissions[i] = i
+}
+
+#Plot the Rank of a County in terms of it's Population Change vs its Rank in terms of Quantity of Emissions
+emissionsPopChangeByCounty %>%
+  ggplot() +
+  geom_point(aes(x=rankOfEmissions,y=rankOfPopChange,
+                 color=rankOfPopChange*rankOfEmissions),size=3) +
+  geom_smooth(aes(x=rankOfEmissions,y=rankOfPopChange), method = "lm", se = FALSE, color="deeppink") +
+  scale_colour_gradient(low="blue",high="red") +
+  theme_minimal() +
+  annotate('text', emissionsPopChangeByCounty$rankOfEmissions, emissionsPopChangeByCounty$rankOfPopChange-1, label=emissionsPopChangeByCounty$name) +
+  xlab(label="Rank by Quantity of Emissions") +
+  ylab(label="Rank by Increase in Population") +
+  labs(title="California Counties Ranked", subtitle = "Population Increase vs Emissions") + 
+  guides(color="none",size="none")
+```
+
+
+As evident by the chart, it turns out that the greater emissions you have, the more positive your population change is. This makes sense as it is a normal trend of population clusters around the world. Simply, if you have more people coming in, you'll need more energy for them and thus will create more emissions when supplying that energy. It seems that the pollution in and around these regions is not bad enough yet to convince individuals to move elsewhere.
+
+
+
+
+
+
+#### Question 3: What are the demographics in the counties with the most emissions?
+
+Finally, I was interested in determining if the emissions from power generation were disproportionately affecting underrepresented demographic groups. In order to determine this, I started by making a list of the top 10 counties which produce the most emissions. I also got data about the demographics of all the counties in California. Using this demographic information, I found the average percent representation of each demographic across all of California. This "average percent" value is important as I used it to find the percentage point difference between a demographic across all of California and its specific representation in each of the top 10 emitting counties. Rephrasing this statement for clarification; I found the difference of a demographic's percent representation statewide and its representation in the top 10 emitting counties. I was then able to create a column chart of this "difference from Average Representation" value and each of the Demographics, faceting it by county:
+
+
+```{r caCountyDemogrphicsTop10Emitters, echo=FALSE, message=FALSE}
+#Get the top 10 counties with the worst emissions
+top10EmittingCounties <- caEmissionsByCounty %>% 
+  ungroup() %>%
+  arrange(desc(county_total_emissions)) %>%
+  mutate(id=as.double(id)) %>%
+  select(-county) %>%
+  head(10)
+
+#Get the Demographics of California Counties
+CaCountyDemographics <- acs2017 %>%
+  filter(State == "California") %>%
+  rename(id=CountyId) %>%
+  select(-State) %>%
+  select(id, Hispanic, White, Black, Native, Asian, Pacific, County) %>%
+  mutate(County = str_remove(County," County")) %>%
+  rename(county = County)
+
+#Get the average percentage of each racial demographic in California
+meanHispanic <- mean(CaCountyDemographics$Hispanic)
+meanWhite <- mean(CaCountyDemographics$White)
+meanBlack <- mean(CaCountyDemographics$Black)
+meanNative <- mean(CaCountyDemographics$Native)
+meanAsian <- mean(CaCountyDemographics$Asian)
+meanPacific <- mean(CaCountyDemographics$Pacific)
+
+#Get demographics of top10EmittingCounties by joining dataframes,
+#and then Get each Demographic's percent difference from the average in each county
+top10EmittingCountiesDemos <- left_join(top10EmittingCounties, CaCountyDemographics) %>%
+  pivot_longer(Hispanic:Pacific,names_to = "demographic",values_to = "percent") %>%
+  mutate(diffFromAvgRepresentation = case_when(demographic == "Hispanic" ~ percent - meanHispanic,
+                                               demographic == "White" ~ percent - meanWhite,
+                                               demographic == "Black" ~ percent - meanBlack,
+                                               demographic == "Native" ~ percent - meanNative,
+                                               demographic == "Asian" ~ percent - meanAsian,
+                                               demographic == "Pacific" ~ percent - meanPacific),
+         diffFromAvgRepresentation = round(diffFromAvgRepresentation,2),
+         sign = sign(diffFromAvgRepresentation))
+
+#Create a Column chart of the difference of each demographic's percent difference from the average 
+#in the counties with the worst emissions
+top10EmittingCountiesDemos %>%
+  ggplot(aes(x=demographic,y=diffFromAvgRepresentation,fill=factor(sign))) +
+  geom_col() +
+  theme_light() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label="Demographic") +
+  ylab(label="Representation Relative to Average") +
+  labs(title="Demographic Representation in California Counties", 
+       subtitle = "Top 10 Pollutant Emitters", 
+       fill="Demographic") + 
+  scale_fill_manual(values = c("firebrick4", "chartreuse4")) +
+  guides(fill="none") +
+  facet_wrap(~ county, nrow = 2)
+```
+
+
+What we see above is that any time a Demographic's percent representation in a county is less than the state average, the value is negative and its bar is colored red. Of course, when its percent average in that county is greater than the state average, it is positive and colored green. Immediately, what stands out is that the white Demographic in the counties with the worst emissions always has a smaller representation than its state average. The Native and Pacific Demographics are already so small such that their relative difference from the mean is very minor, but it appears that they are less than their mean state representation as well. The remaining three demographics in this list do *on occasion* score below their state average, but they tend to stay very near it when they do. Generally though, I think it is fair to say that the Asian, Black, and Hispanic demographics are disproportionately represented in the counties with the worst emissions. In fact, the few times one of those three crosses into the red, either one or both of the other two are excessively over-represented in that county.
+
+
+Out of curiosity about confirming the above mentioned trends, I took the average of each Demographics representation in these 10 counties and found the difference from the state wide mean in order to produce the following chart:
+
+```{r caCountyDemogrphicsTop10EmittersAverage, echo=FALSE}
+#Get average Demographic representation of the top 10 emitting counties
+top10EmittingCountiesDemosAverage <- top10EmittingCountiesDemos %>%
+  group_by(demographic) %>%
+  summarize(avgDemoRep = mean(diffFromAvgRepresentation)) %>%
+  mutate(sign = sign(avgDemoRep))
+  
+#Graph the demographics of the above average
+top10EmittingCountiesDemosAverage %>%
+  ggplot(aes(x=demographic,y=avgDemoRep,fill=factor(sign))) +
+  geom_col() +
+  theme_light() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label="Demographic") +
+  ylab(label="Representation Relative to Average") +
+  labs(title="Demographic Representation in California Counties", 
+       subtitle = "Average of Top 10 Pollutant Emitters", 
+       fill="Demographic") + 
+  scale_fill_manual(values = c("firebrick4", "chartreuse4")) +
+  guides(fill="none")
+```
+
+
+Though it is a much smaller, simpler visualization, I think this bar chart makes the truth self-evident. Demographics which are underrepresented statewide have to suffer the worst emission pollution across California's counties.
+
+
+
+Seeing the relative Demographic representation in each of the top 10 worst polluting counties, I was curious about the same distribution in the 10 counties which pollute the least:
+
+```{r caCountyDemogrphicsBottom10Emitters, echo=FALSE, message=FALSE}
+#Get the 10 Counties with the least emissions and their demographics
+bottom10EmittingCounties <- caEmissionsByCounty %>% 
+  ungroup() %>%
+  arrange(county_total_emissions) %>%
+  mutate(id=as.double(id)) %>%
+  select(-county) %>%
+  head(10)
+
+#Get demographics of bottom10EmittingCounties
+bottom10EmittingCountiesDemos <- left_join(bottom10EmittingCounties, CaCountyDemographics) %>%
+  pivot_longer(Hispanic:Pacific,names_to = "demographic",values_to = "percent") %>%
+  mutate(diffFromAvgRepresentation = case_when(demographic == "Hispanic" ~ percent - meanHispanic,
+                                               demographic == "White" ~ percent - meanWhite,
+                                               demographic == "Black" ~ percent - meanBlack,
+                                               demographic == "Native" ~ percent - meanNative,
+                                               demographic == "Asian" ~ percent - meanAsian,
+                                               demographic == "Pacific" ~ percent - meanPacific),
+         diffFromAvgRepresentation = round(diffFromAvgRepresentation,2),
+         sign = sign(diffFromAvgRepresentation))
+
+#Graph the demographics of the 10 least emitting counties
+bottom10EmittingCountiesDemos %>%
+  ggplot(aes(x=demographic,y=diffFromAvgRepresentation,fill=factor(sign))) +
+  geom_col() +
+  theme_light() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label="Demographic") +
+  ylab(label="Representation Relative to Average") +
+  labs(title="Demographic Representation in California Counties", 
+       subtitle = "Bottom 10 Pollutant Emitters", 
+       fill="Demographic") + 
+  scale_fill_manual(values = c("firebrick4", "chartreuse4")) +
+  guides(fill="none") +
+  facet_wrap(~ county, nrow = 2)
+```
+
+At first glance, this chart seems nearly the inverse of the previous, but personally I was surprised that there were still such large negative measurements for the white demographic. After all, it can't be that every county is less than the state average, right? Right. It turns out that the above visualization is of the counties with the least emission *as long as they still had emissions*. 
+
+Instead, lets take a look a the counties with truly the fewest emissions. Those with absolutely none:
+
+
+```{r caCountyDemogrphicsNoEmissions, echo=FALSE}
+#We can graph Demographics of counties with NO Emissions
+
+#Get all FIPS in California
+caFips <- countyFIPS  %>%
+  filter(STATE=="CA") %>%
+  select(STCOUNTYFP) %>%
+  rename(id = STCOUNTYFP) %>%
+  distinct() %>%
+  pull(id) %>%
+  as.integer()
+
+#Get FIPS of Counties that have Emissions for Energy
+caCountyWithEnergyEmissionsFips <- pull(caEmissionsByCounty,id) %>%
+  as.integer()
+
+#Get FIPS of Counties that don't have Emissions for Energy
+caCountyNoEnergyEmissionsFips <- data.frame(id = setdiff(caFips,caCountyWithEnergyEmissionsFips))
+
+
+#Get demographics of counties that don't have Emissions for Energy
+noEmissionsCounties <- left_join(caCountyNoEnergyEmissionsFips, CaCountyDemographics,by="id") %>%
+  pivot_longer(Hispanic:Pacific,names_to = "demographic",values_to = "percent") %>%
+  mutate(diffFromAvgRepresentation = case_when(demographic == "Hispanic" ~ percent - meanHispanic,
+                                               demographic == "White" ~ percent - meanWhite,
+                                               demographic == "Black" ~ percent - meanBlack,
+                                               demographic == "Native" ~ percent - meanNative,
+                                               demographic == "Asian" ~ percent - meanAsian,
+                                               demographic == "Pacific" ~ percent - meanPacific),
+         diffFromAvgRepresentation = round(diffFromAvgRepresentation,2),
+         sign = sign(diffFromAvgRepresentation))
+
+#Generate Barchart of Demographics in Counties with No Emissions
+noEmissionsCounties %>%
+  ggplot(aes(x=demographic,y=diffFromAvgRepresentation,fill=factor(sign))) +
+  geom_col() +
+  theme_light() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label="Demographic") +
+  ylab(label="Representation Relative to Average") +
+  labs(title="Demographic Representation in California Counties", 
+       subtitle = "No Registered Pollutant Emitters", 
+       fill="Demographic") + 
+  scale_fill_manual(values = c("firebrick4", "chartreuse4")) +
+  guides(fill="none") +
+  facet_wrap(~ county, nrow = 2)
+```
+
+
+Now we can really see the truth of the matter. Every single county (baring 2 of 14) which don't produce emissions in California is dominated by white representation. The only counties that are not dominate by white representation are dominated by the Hispanic demographic, and this is likely as it is a cultural hub for this group. In fact, other than San Benito and Glenn (the counties dominated by the Hispanic demographic), the three underrepresented groups of Asian, Black, and Hispanic are all entirely in the red. If it wasn't evident before, it should be clear now that certain demographics suffer the pollution of emissions far worse than others.
+
+
+Finally, as we've been look at the percent difference from the state mean this whole time, I was curious about seeing the raw percent representation of each demographic across these two extremes. Below I have created two tables. The first is of the top 10 counties with the most emissions, and the second is of those counties with no emissions:
+
+
+```{r caCountyDemogrphicsTables, echo=FALSE, message=FALSE}
+#Get Data pf Demographics for Counties with the Most Emissions
+top10EmittingCountiesDemosTable <- left_join(top10EmittingCounties, CaCountyDemographics) %>%
+  select(county, Asian, Black, Hispanic, Native, Pacific, White) %>%
+  arrange(county) %>%
+  rename(County = county)
+
+#Get Data of Demographics for Counties with No Emissions
+noEmissionsCountiesDemosTable <- left_join(caCountyNoEnergyEmissionsFips, CaCountyDemographics) %>%
+  select(county, Asian, Black, Hispanic, Native, Pacific, White) %>%
+  arrange(county) %>%
+  rename(County = county)
+
+#Show Table of Top 10 Emitters
+top10EmittingCountiesDemosTable %>% kbl(align="c") %>%
+  kable_styling(bootstrap_options="striped",
+                full_width=FALSE,
+                position="center") %>%
+  row_spec(0,color="white",background="#2f4f4f") %>%
+  row_spec(1:10,color="#2f4f4f")
+
+#Show Table of No Emitters
+noEmissionsCountiesDemosTable %>%
+  kbl(align="c") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"),
+                full_width=FALSE,position="center") %>%
+  row_spec(0,color="white",background="#2f4f4f") %>%
+  row_spec(1:14, color="#2f4f4f")
+```
+
+Even without getting into the nuance of difference from the state mean, we can at a glance come to similar conclusions as before. I would even argue that seeing the magnitude of each county's demographic breakdown makes the situation seem even more self-evident.
+
+
+#### Conclusion
+
+Overall, the conclusions we can come to about California's emissions in relation to electricity supply are relatively standard and unfortunately too common. It produces more emissions near it largest population centers: Los Angeles and the Bay Area. As the population of a region changes more positively, it tends to have greater emissions. Finally, demographics which are underrepresented statewide must suffer the worst of the pollution from emissions. Though it would be very challenging and there are many practical difficulties, it may one day be useful to consider decoupling these trends. California is just one state, but these trends have been spoken about as a worldwide phenomenon. Eventually, populations will suffer too much from pollution. We will need to find a way to limit or remove the contaminates from our largest centers of civilization if we hope to for a better future.
+
+
+### Section 3 - Jeremy
+
+## Question 1: What counties in CA generate the most power, and which ones consume the most power? 
+
+
+To answer this question, we are going to use 5 different data sets. The first dataset, powerplants, contains the name, latitude, longitude, fuels, and power generation of many different power plants.  However, we are interested in the counties the power plants are located in.  Thus, we are going to use a shape file to determine where the power plants intersect with the counties.
+
+The powerplants dataset was sourced from the following website: https://datasets.wri.org/dataset/globalpowerplantdatabase.
+
+The process for finding the FIPS code from the latitude and longitude was sourced from the following website (with modifications for reduced overall code): https://shiandy.com/post/2020/11/02/mapping-lat-long-to-fips/. 
+
+The county shape files were sourced from the following website: https://www.census.gov/geographies/mapping-files/time-series/geo/carto-boundary-file.html. 
+```{r s1.1, warning=FALSE, echo=FALSE}
+# County / Name/ Lat / Long / powerGeneration / primary__fuel / other_fuels / others
+powerplants <- read_csv("./data/global_power_plant_database_v_1_3/global_power_plant_database.csv",
+                        show_col_types = FALSE) %>%
+  filter(country == "USA")
+
+# GEOID (fips) / state FIPS / county name / geometry
+countyCAShape <- st_read("./data/cb_2018_us_county_500k/cb_2018_us_county_500k.shp", quiet = TRUE) %>%
+  filter(STATEFP == "06")
+
+# Add a column to powerplants, making a point geometry object.  'remove = false' prevents needing to make a join later.  The crs argument looks at the countyCAShape format to determine the format for the point object.
+powerplants_geom <- powerplants %>%
+  filter(!is.na(latitude), !is.na(longitude)) %>%
+  st_as_sf(coords = c("longitude", "latitude"), remove=FALSE, crs = st_crs(countyCAShape))
+
+# This variable stores which point objects is within which countyCAShape object.
+intersected <- st_intersects(powerplants_geom, countyCAShape)
+
+# Retrieve the fips code for all powerplants that match to a CA county, dropping the rest.  Then, add two columns, one for the stateFIPS portion and one for the countyFIPS portion.  Lastly, remove the intersection and geometry as they are no longer needed.
+# Note: The %/% operator performs integer division.  The %% operator performs the modulus operation.
+powerplants_ca_FIPS <- powerplants_geom %>%
+  mutate(intersection = as.integer(intersected),
+         fips = if_else(is.na(intersection), "",
+                        countyCAShape$GEOID[intersection])) %>%
+  filter(!is.na(intersection)) %>%
+  mutate(fips = as.integer(fips),
+         stateFIPS = fips%/%1000,
+         countyFIPS = fips%%1000) %>%
+  select(!intersection) %>%
+  st_set_geometry(NULL)
+
+# View a portion of the wrangled data.
+powerplants_ca_FIPS %>%
+  select(country:primary_fuel, generation_gwh_2019, fips) %>%
+  head(n=5)
+
+```
+
+
+Now that we know what counties the power plants are in, we need to be able to map the counties. The third and fourth data sets give us the coordinates for the borders of California and the counties in California.  However, the county co do not include the FIPS code though. Thus, we are going to use the county.fips package to find this last piece of information.
+
+
+The California outline and the county outlines are sourced from the ggplot2 map_data function.
+The county.fips dataset is from the maps package.
+```{r s1.2, echo=FALSE}
+# Retrieve the California state border coordinates, for use in later visualizations.
+ca_border <- map_data("state") %>%
+  filter(region == "california")
+
+# Read in the county outlines, filtering for counties in California.
+ca_county_map <- map_data("county") %>%
+  filter(region == "california")
+
+# Wrangle county.fips, creating 4 new columns: state name, county name, state FIPS, county FIPS.
+# Then, join ca_county_map into the wrangled county.fips.  By being very specific with our "by" argument, we can avoid needing to rename our joining variable.
+ca_county_map_fips <- county.fips %>%
+  separate(col = polyname, into=c("state", "county"), sep = ",") %>%
+  filter(state == "california") %>%
+  mutate(fips = as.integer(fips),
+         stateFIPS = fips%/%1000,
+         countyFIPS = fips%%1000) %>%
+  left_join(x = ca_county_map,
+            y = .,
+            by = c("region" = "state",
+                   "subregion" = "county"))
+
+# View a portion of the wrangled data.
+head(ca_county_map_fips, n=5)
+
+
+```
+
+
+We have now wrangled most of the data we will be using for the power production half of the question.  Next, we are going to compute the answer to our question.
+
+Some of the steps done here are not necessary to answer the question, but they will provide us with interesting data to plot.
+```{r s1.3, warning=FALSE, echo=FALSE}
+
+# Find the total generation of a county by the fuel used.  Note that this drops specific information about the power plants.
+total_generation_by_county_and_fuel <- powerplants_ca_FIPS %>%
+  filter(!is.na(generation_gwh_2019)) %>%
+  group_by(fips, primary_fuel) %>%
+  summarize(sumGenerationGWH_2019 = sum(generation_gwh_2019))
+
+# Find the total generation of a county.
+total_generation_by_county <- total_generation_by_county_and_fuel %>%
+  group_by(fips) %>%
+  summarize(sumGenerationGWH_2019 = sum(sumGenerationGWH_2019)) %>%
+  mutate(primary_fuel = "Total County") 
+
+# Join the two by adding the totals as rows.  Remove any rows that have a generation equal to zero, when within the floating point margin of error.
+total_generation_by_county_and_fuel <- total_generation_by_county_and_fuel %>%
+  full_join(total_generation_by_county, by=c("fips", "primary_fuel", "sumGenerationGWH_2019")) %>%
+  filter(!near(sumGenerationGWH_2019, 0))
+  
+# Lastly, join this information with the coordinates wrangled earlier.
+total_generation_map <- ca_county_map_fips %>%
+  left_join(total_generation_by_county_and_fuel, by="fips")
+  
+```
+
+This is simply a table showing the answer to the question.
+```{r 1.4a, echo=FALSE}
+total_generation_map %>%
+  select(region:sumGenerationGWH_2019) %>%
+  unique() %>%
+  filter(primary_fuel=="Total County") %>%
+  slice_max(n=5, order_by=sumGenerationGWH_2019)
+```
+
+```{r s1.4b, echo=FALSE}
+total_generation_map %>%
+  na.omit(sumGenerationGWH_2019) %>%
+  ggplot() +
+  geom_polygon(mapping = aes(long, lat, group=group, fill=sumGenerationGWH_2019),
+               color= "lightgray") +
+  geom_polygon(data = ca_border, 
+               mapping = aes(x=long, y=lat, group=group), 
+               fill=NA, 
+               color="black") +
+  geom_point(data = powerplants_ca_FIPS, 
+             mapping = aes(x=longitude, y=latitude, color = primary_fuel, alpha = .5),
+             show.legend = FALSE) +
+  theme_map() +
+  coord_equal() + 
+  labs(title = "California Power Generation by County", subtitle = "Separated by Fuel Source, Powerplant Locations Marked, Data from 2019") +
+  scale_fill_distiller(palette = "Blues", na.value="yellow", trans="reverse") +
+  guides(fill = guide_colorbar(title = "Generation in GWH", reverse=TRUE)) +
+  facet_wrap(~ primary_fuel, nrow=3)
+
+total_generation_map %>% 
+  filter(is.na(primary_fuel)) %>%
+  view()
+```
+
+
+Prepare the data related to the consumption of power.
+```{r s1.5, echo=FALSE}
+
+# Read in this dataset for the other half of the quesion.
+ca_county_power_use <- read_csv("./data/ElectricityByCounty CALIFORNIA Usage in Millions of kWh.csv",
+                                show_col_types = FALSE) %>%
+  mutate(County = tolower(County))
+
+ca_county_power_use_map <- ca_county_map_fips %>%
+  left_join(y = ca_county_power_use, by = c("subregion" = "County"))
+
+```
+
+### Plotting power consumption
+
+These are the 5 California counties that consume the most power.
+```{r s1.6, echo=FALSE}
+ca_county_power_use_map %>%
+  filter(Sector == "Total") %>%
+  select(region:`2019`) %>%
+  unique() %>%
+  slice_max(order_by = `2019`, n=5)
+
+```
+
+
+The graph of power consumption.
+```{r s1.7, echo=FALSE}
+ca_county_power_use_map %>%
+  ggplot() +
+  geom_polygon(mapping = aes(long, lat, group=group, fill=`2019`),
+               color= "lightgray") +
+  geom_polygon(data = ca_border, 
+               mapping = aes(x=long, y=lat, group=group), 
+               fill=NA, 
+               color="black") +
+  theme_map() +
+  coord_equal() + 
+  scale_fill_distiller(palette = "Blues", na.value="yellow", trans="reverse") +
+  labs(title = "California Power Consumption by County", subtitle = "Separated by Residential Usage, Data from 2019") +
+  guides(fill = guide_colorbar(reverse=TRUE, title = "Power Usage in GWH")) +
+  facet_wrap(~ Sector)
+
+#  geom_point(data = wipPowerPlants, mapping = aes(x=longitude, y=latitude, color = primary_fuel)) +
+```
+
+# Notes here about storage, non-power generating counties, etc.
+```{r s1.8, echo=FALSE}
+
+total_generation_by_county_and_fuel %>%
+  filter(primary_fuel == "Storage") %>%
+  view()
+```
+
+
+### Question 2: In California, what counties have an energy surplus and which counties have an energy deficit?
+Get the stats.
+```{r s2.1, echo=FALSE}
+
+net_consumption <- ca_county_power_use_map %>%
+  select(long:`2019`) %>%
+  unique() %>%
+  filter(Sector == "Total")
+
+
+net_production <- total_generation_by_county_and_fuel %>%
+  filter(primary_fuel == "Total County")
+
+usage_vs_production <- left_join(net_consumption, net_production, by="fips") %>%
+  select(!c("Sector", "primary_fuel")) %>%
+  rename(net_usage = `2019`,
+         net_generation = sumGenerationGWH_2019) %>%
+  mutate(net_generation = case_when(is.na(net_generation) ~ 0,
+                                    TRUE ~ net_generation),
+         net_energy = net_generation - net_usage,
+         ratio_prod_v_use = net_generation/net_usage,
+         ratio_net_v_use = net_energy/net_usage)
+```
+        
+Plot the graphs.      
+```{r s2.2, echo=FALSE}
+zero_as_percentile_1 <- (0 - min(usage_vs_production$net_energy)) / (max(usage_vs_production$net_energy) - min(usage_vs_production$net_energy))
+usage_vs_production %>%
+  ggplot() +
+  geom_polygon(mapping = aes(x=long,
+                             y=lat,
+                             group=group,
+                             fill=net_energy),
+               color="lightgray") +
+  geom_polygon(data = ca_border, 
+               mapping = aes(x=long, y=lat, group=group), 
+               fill=NA, 
+               color="black") + 
+  coord_equal() +
+  theme_map() +
+  scale_fill_gradientn(colours = c("red", "white", "blue"),
+                       values = c(0, zero_as_percentile_1, 1)) + 
+  guides(fill = guide_colorbar(draw.ulim = TRUE))
+
+
+usage_vs_production %>%
+  ggplot() +
+  geom_polygon(mapping = aes(x=long,
+                             y=lat,
+                             group=group,
+                             fill=ratio_prod_v_use),
+               color="lightgray") +
+  geom_polygon(data = ca_border,
+               mapping = aes(x=long, y=lat, group=group),
+               fill=NA,
+               color="black") +
+  coord_equal() +
+  theme_map() +
+  scale_fill_gradientn(colours = c("white", "blue"),
+                       values = c(0, 1)) +
+  guides(fill = guide_colorbar())
+
+zero_as_percentile_3 <- (0 - min(usage_vs_production$ratio_net_v_use)) / (max(usage_vs_production$ratio_net_v_use) - min(usage_vs_production$ratio_net_v_use))
+usage_vs_production %>%
+  ggplot() +
+  geom_polygon(mapping = aes(x=long,
+                             y=lat,
+                             group=group,
+                             fill=ratio_net_v_use),
+               color="lightgray") +
+  geom_polygon(data = ca_border, 
+               mapping = aes(x=long, y=lat, group=group), 
+               fill=NA, 
+               color="black") + 
+  coord_equal() +
+  theme_map() +
+  scale_fill_gradientn(colours = c("orange", "white", "blue"),
+                       values = c(0, zero_as_percentile_3, 1)) +
+  guides(fill = guide_colorbar(barheight = 10))
+
+```
+
+Output the tables containing the counties with the highest and lowest net_energy values, by both number and ratio of net_energy to power consumption.
+```{r s2.3, echo=FALSE}
+
+usage_vs_production %>% 
+  select(region:ratio_net_v_use) %>%
+  unique() %>%
+  slice_max(order_by=net_energy, n = 5)
+
+usage_vs_production %>% 
+  select(region:ratio_net_v_use) %>%
+  unique() %>%
+  slice_min(order_by=net_energy, n = 5)
+
+usage_vs_production %>% 
+  select(region:ratio_net_v_use) %>%
+  unique() %>%
+  slice_max(order_by=ratio_net_v_use, n = 5)
+
+usage_vs_production %>% 
+  select(region:ratio_net_v_use) %>%
+  unique() %>%
+  slice_min(order_by=ratio_net_v_use, n = 5)
+
+```
+
+### Question 3: What is the per capita income trend of those in locations where energy is produced versus the income of those where it is consumed?

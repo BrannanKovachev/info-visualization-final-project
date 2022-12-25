@@ -1,0 +1,278 @@
+#Version 1.0
+
+library(tidyverse)
+library(arrow)
+library(stringr)
+# library(sf)
+library(maps)
+library(socviz)
+library(ggthemes)
+library(dplyr)
+
+###### IMPORT DATA ######
+
+#1 Read in data about Electricity Usage in California by County
+# caData <- read_csv("./data/ElectricityByCounty CALIFORNIA Usage in Millions of kWh.csv")
+
+#2 Read in data about Energy type & quantity produced by County in the US
+# countyGeneration <- read_csv("./data/organised_Gen.csv")
+
+#3 Demographic/Population Statistics 2017
+# acs2015 <- read_csv("./data/acs2015_county_data.csv")
+acs2017 <- read_csv("./data/acs2017_county_data.csv")
+
+#4 National Emissions Inventory 2017 - Pollution
+NEI2017 <- read_parquet("./data/NEI_2017_full_data.parquet")
+
+#5 Global power plants 
+#source: https://datasets.wri.org/dataset/globalpowerplantdatabase
+powerPlants <- read_csv("./data/global_power_plant_database_v_1_3/global_power_plant_database.csv")
+
+#6 Population Raw Data Annual County level : No Demographics
+populationData <- read_csv("./data/co-est2019-alldata.csv")
+
+#7 Zip/County/FIPS
+countyFIPS  <- read_csv("./data/ZIP-COUNTY-FIPS_2018-03.csv")
+
+##########
+
+###### Personal: Create Dataframes Required to graph Q1 ######
+
+#Get total emissions in a County
+caEmissionsByCounty <- NEI2017 %>%
+  filter(state=="CA",`pollutant type(s)`!="nan", str_starts(as.character(.$`naics code`),"2211")) %>%
+  select(`fips code`,county,`pollutant type(s)`,`total emissions`,`emissions uom`,`naics code`) %>%
+  mutate(`total emissions`=case_when(as.character(`emissions uom`)=="LB" ~ `total emissions`*.0005,
+                                     TRUE ~ `total emissions`),
+         `fips code` = paste0('0',as.character(`fips code`))) %>%
+  select(-`emissions uom`) %>%
+  group_by(county,`fips code`) %>%
+  summarise(`county_total_emissions`=sum(`total emissions`)) %>%
+  rename(id = `fips code`)
+
+#Get Lat/Long of every PowerPlant in CA
+energySiteLocationsCA <- NEI2017 %>%
+  filter(state=="CA",`pollutant type(s)`!="nan", str_starts(as.character(.$`naics code`),"2211")) %>%
+  select(`site name`,`naics description`,`site latitude`, `site longitude`,
+         address,city,`zip code`,`postal abbreviation`)%>%
+  distinct()
+
+
+counties <- left_join(county_map,caEmissionsByCounty,by="id") %>% na.omit()
+
+counties %>%
+  ggplot(mapping = aes(x=long,y=lat,group=group,fill=county_total_emissions)) +
+  geom_polygon(color="gray") +
+  coord_equal() +
+  theme_map() +
+  scale_fill_gradientn(colors=c("lightgray","darkorchid1","darkorchid2","darkorchid3","darkorchid4"),
+                       name="Emissions (Tons)") +
+  theme(legend.position = "right") +
+  labs(title="Site Emissions in California Counties", subtitle = "Electricity Power Generation, Transmission, and Distribution")
+
+###########
+
+###### Personal: Create Dataframe Required to graph Q2 ######
+caCountyPopulationChange <- populationData %>%
+  filter(STNAME=="California",COUNTY!= "000") %>%
+  select(STATE,CTYNAME,COUNTY,NPOPCHG_2015,NPOPCHG_2016,NPOPCHG_2017,NPOPCHG_2018,NPOPCHG_2019) %>%
+  mutate(fips = paste0(.$STATE,.$COUNTY), 
+         fiveYearAvgPopChange = (NPOPCHG_2015+NPOPCHG_2016+NPOPCHG_2017+NPOPCHG_2018+NPOPCHG_2019)/5,
+         CTYNAME=str_remove(CTYNAME," County")) %>%
+  select(fips, fiveYearAvgPopChange,CTYNAME) %>%
+  rename(id = fips,name=CTYNAME)
+
+emissionsPopChangeByCounty <- left_join(caCountyPopulationChange, caEmissionsByCounty, by="id") %>%
+  select(-county) %>%
+  na.omit()
+
+#sort by popChange
+emissionsPopChangeByCounty <- emissionsPopChangeByCounty %>%
+  arrange(fiveYearAvgPopChange)
+
+#add rank in terms of popChange
+emissionsPopChangeByCounty <- emissionsPopChangeByCounty %>% add_column(rankOfPopChange = NA)
+for (i in 1:length(emissionsPopChangeByCounty$fiveYearAvgPopChange)){
+  emissionsPopChangeByCounty$rankOfPopChange[i] = i
+}
+
+#sort by emissions
+emissionsPopChangeByCounty <- emissionsPopChangeByCounty %>%
+  arrange(county_total_emissions)
+
+#add rank in terms of emissions
+emissionsPopChangeByCounty <- emissionsPopChangeByCounty %>% add_column(rankOfEmissions = NA)
+for (i in 1:length(emissionsPopChangeByCounty$county_total_emissions)){
+  emissionsPopChangeByCounty$rankOfEmissions[i] = i
+}
+
+emissionsPopChangeByCounty %>%
+  ggplot() +
+  geom_point(aes(x=rankOfEmissions,y=rankOfPopChange,
+                 color=rankOfPopChange*rankOfEmissions),size=3) +
+  geom_smooth(aes(x=rankOfEmissions,y=rankOfPopChange), method = "lm", se = FALSE, color="deeppink") +
+  scale_colour_gradient(low="blue",high="red") +
+  theme_minimal() +
+  annotate('text', emissionsPopChangeByCounty$rankOfEmissions, emissionsPopChangeByCounty$rankOfPopChange-1, label=emissionsPopChangeByCounty$name) +
+  xlab(label="Rank by Quantity of Emissions") +
+  ylab(label="Rank by Increase in Population") +
+  labs(title="California Counties Ranked", subtitle = "Population Increase vs Emissions") + 
+  guides(color="none",size="none")
+
+##########
+
+###### Personal: Create Dataframe Required to graph Q3 ######
+
+#get the top 10 counties with the worst emissions
+top10EmittingCounties <- caEmissionsByCounty %>% 
+  ungroup() %>%
+  arrange(desc(county_total_emissions)) %>%
+  mutate(id=as.double(id)) %>%
+  select(-county) %>%
+  head(10)
+
+#Get the Demographics of California Counties
+CaCountyDemographics <- acs2017 %>%
+  filter(State == "California") %>%
+  rename(id=CountyId) %>%
+  select(-State) %>%
+  select(id, Hispanic, White, Black, Native, Asian, Pacific, County) %>%
+  mutate(County = str_remove(County," County")) %>%
+  rename(county = County)
+
+#Get the average percentage of each ethnicity in California
+meanHispanic <- mean(CaCountyDemographics$Hispanic)
+meanWhite <- mean(CaCountyDemographics$White)
+meanBlack <- mean(CaCountyDemographics$Black)
+meanNative <- mean(CaCountyDemographics$Native)
+meanAsian <- mean(CaCountyDemographics$Asian)
+meanPacific <- mean(CaCountyDemographics$Pacific)
+
+#Get demographics of top10EmittingCounties
+top10EmittingCountiesDemos <- left_join(top10EmittingCounties, CaCountyDemographics) %>%
+  pivot_longer(Hispanic:Pacific,names_to = "ethnicity",values_to = "percent") %>%
+  mutate(diffFromAvgRepresentation = case_when(ethnicity == "Hispanic" ~ percent - meanHispanic,
+                                               ethnicity == "White" ~ percent - meanWhite,
+                                               ethnicity == "Black" ~ percent - meanBlack,
+                                               ethnicity == "Native" ~ percent - meanNative,
+                                               ethnicity == "Asian" ~ percent - meanAsian,
+                                               ethnicity == "Pacific" ~ percent - meanPacific),
+         diffFromAvgRepresentation = round(diffFromAvgRepresentation,2),
+         sign = sign(diffFromAvgRepresentation))
+
+#Graph top10EmittingCountiesDemos
+top10EmittingCountiesDemos %>%
+  ggplot(aes(x=ethnicity,y=diffFromAvgRepresentation,fill=factor(sign))) +
+  geom_col() +
+  theme_light() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label="Ethnicity") +
+  ylab(label="Representation Relative to Average") +
+  labs(title="Ethnic Representation in California Counties", 
+       subtitle = "Top 10 Pollutant Emitters", 
+       fill="Ethnicity") + 
+  scale_fill_manual(values = c("firebrick4", "chartreuse4")) +
+  guides(fill="none") +
+  facet_wrap(~ county, nrow = 2)
+
+#Get average of top 10 emitters
+top10EmittingCountiesDemosAverage <- top10EmittingCountiesDemos %>%
+  group_by(ethnicity) %>%
+  summarize(avgEthnicRep = mean(diffFromAvgRepresentation)) %>%
+  mutate(sign = sign(avgEthnicRep))
+  
+#Graph
+top10EmittingCountiesDemosAverage %>%
+  ggplot(aes(x=ethnicity,y=avgEthnicRep,fill=factor(sign))) +
+  geom_col() +
+  theme_light() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label="Ethnicity") +
+  ylab(label="Representation Relative to Average") +
+  labs(title="Ethnic Representation in California Counties", 
+       subtitle = "Average of Top 10 Pollutant Emitters", 
+       fill="Ethnicity") + 
+  scale_fill_manual(values = c("firebrick4", "chartreuse4")) +
+  guides(fill="none")
+
+#Get the 10 Counties with the least emissions and their demographics
+bottom10EmittingCounties <- caEmissionsByCounty %>% 
+  ungroup() %>%
+  arrange(county_total_emissions) %>%
+  mutate(id=as.double(id)) %>%
+  select(-county) %>%
+  head(10)
+
+#Get demographics of bottom10EmittingCounties
+bottom10EmittingCountiesDemos <- left_join(bottom10EmittingCounties, CaCountyDemographics) %>%
+  pivot_longer(Hispanic:Pacific,names_to = "ethnicity",values_to = "percent") %>%
+  mutate(diffFromAvgRepresentation = case_when(ethnicity == "Hispanic" ~ percent - meanHispanic,
+                                               ethnicity == "White" ~ percent - meanWhite,
+                                               ethnicity == "Black" ~ percent - meanBlack,
+                                               ethnicity == "Native" ~ percent - meanNative,
+                                               ethnicity == "Asian" ~ percent - meanAsian,
+                                               ethnicity == "Pacific" ~ percent - meanPacific),
+         diffFromAvgRepresentation = round(diffFromAvgRepresentation,2),
+         sign = sign(diffFromAvgRepresentation))
+
+#Graph
+bottom10EmittingCountiesDemos %>%
+  ggplot(aes(x=ethnicity,y=diffFromAvgRepresentation,fill=factor(sign))) +
+  geom_col() +
+  theme_light() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label="Ethnicity") +
+  ylab(label="Representation Relative to Average") +
+  labs(title="Ethnic Representation in California Counties", 
+       subtitle = "Bottom 10 Pollutant Emitters", 
+       fill="Ethnicity") + 
+  scale_fill_manual(values = c("firebrick4", "chartreuse4")) +
+  guides(fill="none") +
+  facet_wrap(~ county, nrow = 2)
+
+#We can graph Demographics of counties with NO Emissions
+#Get all FIPS in California
+caFips <- countyFIPS  %>%
+  filter(STATE=="CA") %>%
+  select(STCOUNTYFP) %>%
+  rename(id = STCOUNTYFP) %>%
+  distinct() %>%
+  pull(id) %>%
+  as.integer()
+
+#Get FIPS of Counties that have Emissions for Energy
+caCountyWithEnergyEmissionsFips <- pull(caEmissionsByCounty,id) %>%
+  as.integer()
+
+#Get FIPS of Counties that don't have Emissions for Energy
+caCountyNoEnergyEmissionsFips <- data.frame(id = setdiff(caFips,caCountyWithEnergyEmissionsFips))
+
+
+#Get demographics of counties that don't have Emissions for Energy
+noEmissionsCounties <- left_join(caCountyNoEnergyEmissionsFips, CaCountyDemographics,by="id") %>%
+  pivot_longer(Hispanic:Pacific,names_to = "ethnicity",values_to = "percent") %>%
+  mutate(diffFromAvgRepresentation = case_when(ethnicity == "Hispanic" ~ percent - meanHispanic,
+                                               ethnicity == "White" ~ percent - meanWhite,
+                                               ethnicity == "Black" ~ percent - meanBlack,
+                                               ethnicity == "Native" ~ percent - meanNative,
+                                               ethnicity == "Asian" ~ percent - meanAsian,
+                                               ethnicity == "Pacific" ~ percent - meanPacific),
+         diffFromAvgRepresentation = round(diffFromAvgRepresentation,2),
+         sign = sign(diffFromAvgRepresentation))
+
+noEmissionsCounties %>%
+  ggplot(aes(x=ethnicity,y=diffFromAvgRepresentation,fill=factor(sign))) +
+  geom_col() +
+  theme_light() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label="Ethnicity") +
+  ylab(label="Representation Relative to Average") +
+  labs(title="Ethnic Representation in California Counties", 
+       subtitle = "No Registered Pollutant Emitters", 
+       fill="Ethnicity") + 
+  scale_fill_manual(values = c("firebrick4", "chartreuse4")) +
+  guides(fill="none") +
+  facet_wrap(~ county, nrow = 2)
+
+##########
+
